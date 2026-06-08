@@ -162,7 +162,7 @@ async def send_daily_question(bot, chat_id=None):
 
         await bot.send_message(
             chat_id=chat_id,
-            text=f"🎓 *Вопрос дня* — {topic}\n\n{quiz['question']}",
+            text=f"🎓 *Тема вопроса* — {topic}\n\n{quiz['question']}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
