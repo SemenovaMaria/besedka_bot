@@ -233,7 +233,6 @@ async def main_async():
 
     schedule = [
         (int(os.environ.get("SEND_HOUR_1", "9")),  int(os.environ.get("SEND_MINUTE_1", "0"))),
-        (int(os.environ.get("SEND_HOUR_2", "16")), int(os.environ.get("SEND_MINUTE_2", "0"))),
     ]
 
     for hour, minute in schedule:
@@ -247,8 +246,8 @@ async def main_async():
 
     scheduler.start()
     times = ", ".join(f"{h:02d}:{m:02d} UTC" for h, m in schedule)
-    logger.info(f"Планировщик запущен. Вопросы в {times} (12:00 и 19:00 МСК)")
-
+    logger.info(f"Планировщик запущен. Вопросы в {times} (12:00 МСК)")
+    
     async with app:
         await app.start()
         await app.updater.start_polling()
