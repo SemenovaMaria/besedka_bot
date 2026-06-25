@@ -23,6 +23,42 @@ logger = logging.getLogger(__name__)
 
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
+# ─── История вопросов (защита от повторов) ──────────────────────────────────
+
+HISTORY_FILE = os.environ.get("HISTORY_FILE", "question_history.json")
+HISTORY_LIMIT = int(os.environ.get("HISTORY_LIMIT", "15"))  # сколько последних вопросов помним
+
+
+def load_history() -> list:
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Не удалось прочитать историю: {e}")
+        return []
+
+
+def save_history(history: list):
+    history = history[-HISTORY_LIMIT:]
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить историю: {e}")
+
+
+def add_to_history(student: str, topic: str, assignment: str, question_text: str):
+    history = load_history()
+    history.append({
+        "student": student,
+        "topic": topic,
+        "assignment": assignment,
+        "question": question_text,
+    })
+    save_history(history)
+
 
 # ─── Веб-сервер ──────────────────────────────────────────────────────────────
 
@@ -75,13 +111,28 @@ def get_random_assignment():
     if not data_rows or not students_with_idx:
         raise ValueError("Нет данных в таблице")
 
-    row = random.choice(data_rows)
-    student_name, col_idx = random.choice(students_with_idx)
+    # Собираем все возможные пары (тема, ученик) с непустыми заданиями
+    all_pairs = []
+    for row in data_rows:
+        topic = row[0].strip()
+        for student_name, col_idx in students_with_idx:
+            assignment = row[col_idx].strip() if col_idx < len(row) else ""
+            if assignment:
+                hint = row[hint_col_idx].strip() if hint_col_idx and hint_col_idx < len(row) else ""
+                all_pairs.append((student_name, topic, assignment, hint))
 
-    topic = row[0].strip()
-    assignment = row[col_idx].strip() if col_idx < len(row) else ""
-    hint = row[hint_col_idx].strip() if hint_col_idx and hint_col_idx < len(row) else ""
+    if not all_pairs:
+        raise ValueError("Нет заполненных заданий в таблице")
 
+    # Исключаем пары, которые недавно уже задавались
+    history = load_history()
+    recent_keys = {(h["student"], h["assignment"]) for h in history}
+    fresh_pairs = [p for p in all_pairs if (p[0], p[2]) not in recent_keys]
+
+    # Если всё уже было недавно использовано — берём из полного списка
+    pool = fresh_pairs if fresh_pairs else all_pairs
+
+    student_name, topic, assignment, hint = random.choice(pool)
     return student_name, topic, assignment, hint
 
 
@@ -90,14 +141,23 @@ def get_random_assignment():
 def generate_question(student: str, topic: str, assignment: str, hint: str) -> dict:
     hint_block = f"\nДополнительный акцент: {hint}" if hint else ""
 
+    history = load_history()
+    if history:
+        recent_questions = "\n".join(f"- {h['question']}" for h in history[-10:])
+        history_block = (
+            f"\n\nУЖЕ БЫЛИ ЭТИ ВОПРОСЫ (не повторяй ни формулировку, ни тот же факт/акцент):\n{recent_questions}"
+        )
+    else:
+        history_block = ""
+
     # Многошаговый промпт: факты → вопрос → проверка → финальный JSON
     prompt = f"""Ты составляешь вопрос для викторины. Работай строго по шагам.
 
 Ученик: {student}
 Тема: {topic}
-Что должен знать ученик: {assignment}{hint_block}
+Что должен знать ученик: {assignment}{hint_block}{history_block}
 
-ШАГ 1 — ФАКТЫ: напиши 3-5 фактов которые ты знаешь достоверно про "{assignment}". Если сомневаешься в факте — не пиши его совсем.
+ШАГ 1 — ФАКТЫ: напиши 3-5 фактов которые ты знаешь достоверно про "{assignment}". Если сомневаешься в факте — не пиши его совсем. Выбери факт, который НЕ совпадает с уже заданными вопросами выше.
 
 ШАГ 2 — ЧЕРНОВИК: составь вопрос и 4 варианта ответа на основе фактов из шага 1.
 
@@ -105,6 +165,7 @@ def generate_question(student: str, topic: str, assignment: str, hint: str) -> d
 - Правильный ответ точно верен? (да/нет)
 - Все 4 варианта одного типа — все имена, или все числа, или все города? (да/нет)
 - Ни один неправильный вариант случайно не является правильным? (да/нет)
+- Вопрос не повторяет уже заданные вопросы выше? (да/нет)
 - Если хоть один ответ "нет" — исправь черновик.
 
 ШАГ 4 — JSON: напиши финальный проверенный результат строго в этом формате:
@@ -132,7 +193,9 @@ JSON:
             if "JSON:" in raw:
                 raw = raw.split("JSON:")[-1].strip()
             raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            return json.loads(raw)
+            quiz = json.loads(raw)
+            add_to_history(student, topic, assignment, quiz["question"])
+            return quiz
         except Exception as e:
             if attempt < 3:
                 wait = 5 * (2 ** attempt)  # 5, 10, 20 сек
@@ -246,8 +309,8 @@ async def main_async():
 
     scheduler.start()
     times = ", ".join(f"{h:02d}:{m:02d} UTC" for h, m in schedule)
-    logger.info(f"Планировщик запущен. Вопросы в {times} (12:00 МСК)")
-    
+    logger.info(f"Планировщик запущен. Вопросы в {times} (12:00 и 19:00 МСК)")
+
     async with app:
         await app.start()
         await app.updater.start_polling()
