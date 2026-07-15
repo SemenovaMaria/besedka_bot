@@ -120,27 +120,43 @@ JSON:
 - correct_index перемешивай каждый раз — не всегда 0
 - Язык всего ответа: русский"""
 
+    last_raw = None  # для лога, если все попытки провалятся
+
     for attempt in range(4):
         try:
             response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=900,
+                max_tokens=2500,          # было 900 — не хватало на 4-шаговый CoT на русском
                 temperature=0.5,
+                reasoning_effort="low",   # шаги уже прописаны в промпте явно,
+                                          # скрытые рассуждения модели не нужны и съедают лимит токенов
             )
-            raw = response.choices[0].message.content.strip()
+
+            choice = response.choices[0]
+            raw = (choice.message.content or "").strip()
+            last_raw = raw
+
+            if not raw:
+                raise ValueError(
+                    f"Groq вернул пустой content (finish_reason={choice.finish_reason})"
+                )
+
             if "JSON:" in raw:
                 raw = raw.split("JSON:")[-1].strip()
             raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+
             return json.loads(raw)
         except Exception as e:
+            logger.warning(
+                f"Groq ошибка (попытка {attempt+1}): {e}. Сырой ответ модели: {last_raw!r}"
+            )
             if attempt < 3:
                 wait = 5 * (2 ** attempt)  # 5, 10, 20 сек
-                logger.warning(f"Groq ошибка (попытка {attempt+1}): {e}. Жду {wait} сек...")
+                logger.warning(f"Жду {wait} сек...")
                 time.sleep(wait)
             else:
                 raise
-
 
 
 # ─── Отправка вопроса ────────────────────────────────────────────────────────
