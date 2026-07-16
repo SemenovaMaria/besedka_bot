@@ -129,8 +129,6 @@ JSON:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=2500,          # было 900 — не хватало на 4-шаговый CoT на русском
                 temperature=0.5,
-                reasoning_effort="low",   # шаги уже прописаны в промпте явно,
-                                          # скрытые рассуждения модели не нужны и съедают лимит токенов
             )
 
             choice = response.choices[0]
