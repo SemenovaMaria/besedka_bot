@@ -2,6 +2,7 @@ import logging
 import random
 import json
 import os
+import re
 import asyncio
 import time
 from threading import Thread
@@ -127,24 +128,44 @@ JSON:
             response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=2500,          # было 900 — не хватало на 4-шаговый CoT на русском
-                temperature=0.5,
+                max_tokens=4000,          # без reasoning_effort модель тратит больше токенов
+                temperature=0.5,          # на скрытые рассуждения — им тоже нужен запас
             )
 
             choice = response.choices[0]
-            raw = (choice.message.content or "").strip()
-            last_raw = raw
+            raw_original = (choice.message.content or "").strip()
+            last_raw = f"{raw_original[:500]!r} (finish_reason={choice.finish_reason})"
 
-            if not raw:
+            if not raw_original:
                 raise ValueError(
                     f"Groq вернул пустой content (finish_reason={choice.finish_reason})"
                 )
 
-            if "JSON:" in raw:
-                raw = raw.split("JSON:")[-1].strip()
-            raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            # Модель не всегда пишет "JSON:" буквально (иногда "**ШАГ 4 — JSON**" и т.п.),
+            # поэтому ищем сам JSON-блок, а не полагаемся на точную фразу-маркер.
+            candidate = None
 
-            return json.loads(raw)
+            code_block = re.search(r"```json\s*(\{.*?\})\s*```", raw_original, re.DOTALL)
+            if code_block:
+                candidate = code_block.group(1)
+
+            if candidate is None:
+                any_block = re.search(r"```\s*(\{.*?\})\s*```", raw_original, re.DOTALL)
+                if any_block:
+                    candidate = any_block.group(1)
+
+            if candidate is None:
+                brace_match = re.search(r"\{.*\}", raw_original, re.DOTALL)
+                if brace_match:
+                    candidate = brace_match.group(0)
+
+            if not candidate:
+                raise ValueError(
+                    f"Не удалось найти JSON в ответе модели (finish_reason={choice.finish_reason}): "
+                    f"{raw_original[:300]!r}"
+                )
+
+            return json.loads(candidate)
         except Exception as e:
             logger.warning(
                 f"Groq ошибка (попытка {attempt+1}): {e}. Сырой ответ модели: {last_raw!r}"
